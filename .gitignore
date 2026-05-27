@@ -1,1 +1,2 @@
-./daemon/target
+/daemon/target/
+/daemon/target/*

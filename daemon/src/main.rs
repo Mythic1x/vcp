@@ -80,7 +80,12 @@ async fn main() -> io::Result<()> {
     loop {
         match sock.recv_from(&mut buf).await {
             Ok((data, addr)) => {
-                println!("received {data} bytes from {addr}");
+                match VcpMessage::parse(&buf) {
+                    Ok(res) => {
+                      todo!()  
+                    }
+                    Err(err) => println!("{err}"),
+                }
                 sock.send_to(&buf[..data], addr).await?;
             }
             Err(err) => println!("{}", err),

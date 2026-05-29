@@ -77,13 +77,14 @@ impl JitterBuffer {
 
 
     fn calculate_packet_loss(&self) -> f64 {
+        if self.snapshots.len() < 10 {return 0.0};
         let Some(current_snapshot) = self.snapshots.back() else {return 0.0};
         let highest = current_snapshot.highest_packet_nr;
         let Some(oldest_snapshot) = self.snapshots.front() else {return 0.0};
         let lowest = oldest_snapshot.highest_packet_nr;
 
         let expected_packets = highest - lowest + 1;
-        let received_packets = current_snapshot.packets_received as u64;
+        let received_packets = current_snapshot.packets_received - oldest_snapshot.packets_received as u64;
         let diff = expected_packets - received_packets;
         let packet_loss_ratio = (diff as f64) / (expected_packets as f64);
         return packet_loss_ratio * 100.0;

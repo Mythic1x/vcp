@@ -1,10 +1,13 @@
 mod vcpreciever;
 
+use std::net::SocketAddr;
 use std::{io, str::FromStr};
 use tokio::net::UdpSocket;
 use std::collections::HashMap;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+
+use crate::vcpreciever::{VcpReceiver, VcpReceptionState};
 
 pub enum VcpMessage {
     Call {
@@ -133,42 +136,27 @@ async fn main() -> io::Result<()> {
     let mut buf = [0; 1500]; 
     println!("UDP task running...");
 
+    let mut receivers: HashMap<String, VcpReceiver> = HashMap::new();
     loop {
         match sock.recv_from(&mut buf).await {
-            Ok((data, addr)) => {
-                match VcpMessage::parse(&buf[..data]) {
-                    Ok(res) => {
-                        match res {
-                            VcpMessage::Call { ip, port, mimetype, username } => {
-                                let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
-                                println!("{text}");
-                                
-                                if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
-                                    println!("Failed to send Call response: {}", e);
-                                }
-                            }
-                            VcpMessage::AcceptCall { ip, port, mimetype, username } => {
-                                let mut cmap = udp_map_clone.lock().unwrap();
-                                cmap.insert(addr, JitterBuffer::new());
-                            },
-                            VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
-                            VcpMessage::Packet { packet_nr, data_len, data } => {
-                                let mut cmap = udp_map_clone.lock().unwrap();
-                                if let Some(jitter_buffer) = cmap.get_mut(&addr) {
-                                    //ignore packet if old
-                                    if packet_nr >= jitter_buffer.last_popped {
-                                        jitter_buffer.buffer.insert(packet_nr, data);
-                                    }
-                                } else {
-                                    //placeholder for later testing purposes
-                                    panic!("Sending packets before connection intialized");
-                                }
-                            },
-                        }  
+            Ok((amnt_read, addr)) => {
+                let r = receivers.get_mut(&addr.to_string());
+                match r {
+                    None => {
+                        let r = VcpReceiver::new(buf[0..amnt_read].to_vec());
+                        if *r.get_state() == VcpReceptionState::Done {
+                            println!("{:?}", String::from_utf8(r.get_result().clone()));
+                        }
+                        receivers.insert(addr.to_string(), r);
                     }
-                    Err(err) => println!("Parse Error: {err}"),
+                    Some(r) => {
+                        r.feed(buf.to_vec());
+                        if *r.get_state() == VcpReceptionState::Done {
+                            println!("{:?}", String::from_utf8(r.get_result().clone()));
+                        }
+                        println!("{:?}", r.get_state());
+                    }
                 }
-                
             }
             Err(err) => println!("Socket Receive Error: {}", err),
         }

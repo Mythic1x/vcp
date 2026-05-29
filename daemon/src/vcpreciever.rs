@@ -1,4 +1,4 @@
-#[derive(PartialEq)]
+#[derive(PartialEq, std::fmt::Debug, Eq, Clone, Copy)]
 pub enum VcpReceptionState {
     Action,
     Ip,
@@ -40,7 +40,7 @@ impl VcpReceiver {
             packet_data: vec![]
         };
 
-        while r.has_bytes() {
+        while r.has_bytes() && r.state != VcpReceptionState::Done{
             r.consume();
         }
 
@@ -48,11 +48,11 @@ impl VcpReceiver {
     }
 
     fn has_bytes(&self) -> bool {
-        return self.parsing_pos < self.currently_parsing.len()
+        return self.parsing_pos < self.backlog.len()
     }
 
     fn cur_byte(&self) -> u8 {
-        return self.currently_parsing[self.parsing_pos]
+        return self.backlog[self.parsing_pos]
     }
 
     pub fn consume(&mut self) {
@@ -155,7 +155,6 @@ impl VcpReceiver {
                 self.currently_parsing.push(b);
                 if b == 0x22 /* " */ {
                     self.final_action.extend(self.currently_parsing.clone());
-                    self.final_action.push(0x22);
                     A::Done
                 } else {
                     A::UserNameMiddle
@@ -193,10 +192,14 @@ impl VcpReceiver {
     pub fn feed(&mut self, bytes: Vec<u8>) -> &VcpReceptionState {
         self.backlog.extend(bytes);
 
-        while self.has_bytes() {
+        while self.has_bytes() && self.state != VcpReceptionState::Done {
             self.consume();
         }
 
+        return &self.state
+    }
+
+    pub fn get_state(&self) -> &VcpReceptionState {
         return &self.state
     }
 

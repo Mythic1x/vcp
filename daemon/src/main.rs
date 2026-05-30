@@ -98,13 +98,13 @@ impl JitterBuffer {
             self.total_received_packets += 1;
         }
         self.buffer.insert(packet_nr, packet.to_vec());
-        
+
     }
 
     fn take_snapshot(&mut self) {
-       if self.snapshots.len() == 10 {
-        self.snapshots.pop_front();
-    }
+        if self.snapshots.len() == 10 {
+            self.snapshots.pop_front();
+        }
         let snapshot = NetworkSnapshot::new(self.total_received_packets, self.highest_packet_nr);
         self.snapshots.push_back(snapshot);
     }
@@ -117,16 +117,16 @@ impl JitterBuffer {
 impl VcpMessage {
     fn parse(bytes: &[u8]) -> Result<Self, String> {
         if bytes.starts_with(b"PACKET/")  {
-           let packet_nr_bytes = &bytes[7..15];
-           let packet_nr = u64::from_be_bytes(packet_nr_bytes.try_into().map_err(|_| "Malformed packet found when parsing packet number".to_string())?);
-           let data_len_bytes = &bytes[15..17]; 
-           let data_len = u16::from_be_bytes(data_len_bytes.try_into().map_err(|_| "Malformed packet found when parsing data length".to_string())?);
-           let data_len_us = data_len as usize;
-           if bytes.len() < 17 + data_len_us {
-               return Err("Malformed packet: data length exceeds packet size".to_string());
-           }
-           let data = bytes[17..17 + data_len_us].to_vec();
-           return Ok(VcpMessage::Packet { packet_nr, data_len, data });
+            let packet_nr_bytes = &bytes[7..15];
+            let packet_nr = u64::from_be_bytes(packet_nr_bytes.try_into().map_err(|_| "Malformed packet found when parsing packet number".to_string())?);
+            let data_len_bytes = &bytes[15..17]; 
+            let data_len = u16::from_be_bytes(data_len_bytes.try_into().map_err(|_| "Malformed packet found when parsing data length".to_string())?);
+            let data_len_us = data_len as usize;
+            if bytes.len() < 17 + data_len_us {
+                return Err("Malformed packet: data length exceeds packet size".to_string());
+            }
+            let data = bytes[17..17 + data_len_us].to_vec();
+            return Ok(VcpMessage::Packet { packet_nr, data_len, data });
         } else {
             let text = str::from_utf8(bytes).map_err(|_| "Error converting byte array into string")?;
             let text = text.strip_suffix("\r\n").unwrap_or(text);
@@ -149,7 +149,7 @@ impl VcpMessage {
                     let port = str_port.parse::<u16>().map_err(|_| "Invalid port number")?;
                     let mimetype = args.next().ok_or("Malformed Packet: Missing Mimetype")?.to_string();
                     let username = args.collect::<Vec<&str>>().join(" ").replace('"', "");
-                     if username.is_empty() {
+                    if username.is_empty() {
                         return Err("Malformed Packet: Missing Username".to_string())
                     } 
                     return Ok(VcpMessage::AcceptCall { ip, port, mimetype, username });
@@ -161,7 +161,7 @@ impl VcpMessage {
                     let mimetype = args.next().ok_or("Malformed Packet: Missing Mimetype")?.to_string();
                     let username = args.collect::<Vec<&str>>().join(" ").replace('"', "");
 
-                     if username.is_empty() {
+                    if username.is_empty() {
                         return Err("Malformed Packet: Missing Username".to_string())
                     } 
                     return Ok(VcpMessage::DeclineCall { ip, port, mimetype, username });
@@ -182,92 +182,86 @@ async fn main() -> io::Result<()> {
 
     let udp_map_clone = Arc::clone(&connections_map);
     let udp_handle = tokio::spawn(async move {
-    let mut buf = [0; 1500]; 
-    println!("UDP task running...");
+        let mut buf = [0; 1500]; 
+        println!("UDP task running...");
 
-    //may use later for tcp but not rn
-    //let mut receivers: HashMap<String, VcpReceiver> = HashMap::new();
-    loop {
-        match sock.recv_from(&mut buf).await {
-              Ok((data, addr)) => {
-                match VcpMessage::parse(&buf[..data]) {
-                    Ok(res) => {
-                        match res {
+        //may use later for tcp but not rn
+        let mut receivers: HashMap<String, VcpReceiver> = HashMap::new();
+        loop {
+            match sock.recv_from(&mut buf).await {
+                Ok((amnt_read, addr)) => {
+                    let r = receivers.get_mut(&addr.to_string());
+                    match r {
+                        None => {
+                            let r = VcpReceiver::new(buf[0..amnt_read].to_vec());
+                            receivers.insert(addr.to_string(), r);
+                        }
+                        Some(r) => {
+                            r.feed(buf.to_vec());
+                        }
+                    }
 
+                    let r = receivers.get_mut(&addr.to_string()).unwrap();
+                    if *r.get_state() == VcpReceptionState::Done {
+                        match VcpMessage::parse(r.get_result()) {
+                            Ok(res) => {
+                                match res {
+                                    VcpMessage::Call { ip, port, mimetype, username } => {
+                                        let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
+                                        println!("{text}");
 
-                            VcpMessage::Call { ip, port, mimetype, username } => {
-                                let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
-                                println!("{text}");
-                                
-                                if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
-                                    println!("Failed to send Call response: {}", e);
-                                }
-                            }
-
-
-                            VcpMessage::AcceptCall { ip, port, mimetype, username } => {
-                                let mut cmap = udp_map_clone.lock().unwrap();
-                                cmap.insert(addr, JitterBuffer::new());
-                            },
-
-                            VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
-
-
-                            VcpMessage::Packet { packet_nr, data_len, data } => {
-                                let mut cmap = udp_map_clone.lock().unwrap();
-
-                                if let Some(jitter_buffer) = cmap.get_mut(&addr) {
-                                    //ignore packet if old
-                                    if packet_nr >= jitter_buffer.last_popped {
-                                        jitter_buffer.add_packet(packet_nr, &data);
+                                        if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
+                                            println!("Failed to send Call response: {}", e);
+                                        }
                                     }
 
-                                } else {
-                                    //placeholder for later testing purposes
-                                    panic!("Sending packets before connection intialized");
+
+                                    VcpMessage::AcceptCall { ip, port, mimetype, username } => {
+                                        let mut cmap = udp_map_clone.lock().unwrap();
+                                        cmap.insert(addr, JitterBuffer::new());
+                                    },
+
+                                    VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
+
+
+                                    VcpMessage::Packet { packet_nr, data_len, data } => {
+                                        let mut cmap = udp_map_clone.lock().unwrap();
+
+                                        if let Some(jitter_buffer) = cmap.get_mut(&addr) {
+                                            //ignore packet if old
+                                            if packet_nr >= jitter_buffer.last_popped {
+                                                jitter_buffer.add_packet(packet_nr, &data);
+                                            }
+
+                                        } else {
+                                            //placeholder for later testing purposes
+                                            panic!("Sending packets before connection intialized");
+                                        }
+                                    },
                                 }
                             },
+                            Err(err) => println!("Could not parse data: {}", err)
                         }
-                    },
-                    Err(err) => println!("Parse Error: {}", err),
+                    }
                 }
-              },
-              Err(err) => println!("Socket Receive Error: {}", err),
+                Err(err) => println!("Socket Receive Error: {}", err)
+            };
         }
-    }
-});
+    });
 
-   //for taking snapshots of connections
+    //for taking snapshots of connections
     let cmap_clone = Arc::clone(&connections_map);
     tokio::spawn(async move {
-       let mut timer = tokio::time::interval(Duration::from_secs(1));
+        let mut timer = tokio::time::interval(Duration::from_secs(1));
         loop {
-        timer.tick().await;
-        let mut cmap = cmap_clone.lock().unwrap();
+            timer.tick().await;
+            let mut cmap = cmap_clone.lock().unwrap();
             for (_, jbuffer) in cmap.iter_mut() {
                 jbuffer.take_snapshot();
             }
         }
-   });
+    });
 
     std::future::pending::<()>().await;
     Ok(())
-    
 }
-
-/*  Ok((amnt_read, addr)) => {
-                let r = receivers.get_mut(&addr.to_string());
-                match r {
-                    None => {
-                        let r = VcpReceiver::new(buf[0..amnt_read].to_vec());
-                        if *r.get_state() == VcpReceptionState::Done {
-                            println!("{:?}", String::from_utf8(r.get_result().clone()));
-                        }
-                        receivers.insert(addr.to_string(), r);
-                    }
-                    Some(r) => {
-                        r.feed(buf.to_vec());
-                        if *r.get_state() == VcpReceptionState::Done {
-                            println!("{:?}", String::from_utf8(r.get_result().clone()));
-                        }
-                        println!("{:?}", r.get_state()); */

@@ -4,7 +4,8 @@ use std::cmp;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{io, str::FromStr};
-use tokio::net::UdpSocket;
+use tokio::io::AsyncReadExt;
+use tokio::net::{UdpSocket, TcpSocket};
 use tokio::time::{Interval, interval};
 use std::collections::{HashMap, btree_map};
 use std::collections::BTreeMap;
@@ -196,6 +197,85 @@ impl VcpMessage {
     }
 }
 
+async fn udp_thread(
+        sock: UdpSocket,
+        udp_map_clone: Arc<Mutex<HashMap<SocketAddr, Connection>>>
+    ) {
+    let mut buf = [0; 1500]; 
+    println!("UDP task running...");
+
+    let mut receivers: HashMap<String, VcpReceiver> = HashMap::new();
+    loop {
+        match sock.recv_from(&mut buf).await {
+            Ok((amnt_read, addr)) => {
+                let r = receivers.get_mut(&addr.to_string());
+                match r {
+                    None => {
+                        let r = VcpReceiver::new(buf[0..amnt_read].to_vec());
+                        receivers.insert(addr.to_string(), r);
+                    }
+                    Some(r) => {
+                        r.feed(buf.to_vec());
+                    }
+                }
+
+                let r = receivers.get_mut(&addr.to_string()).unwrap();
+                if *r.get_state() == VcpReceptionState::Done {
+                    match VcpMessage::parse(r.get_result()) {
+                        Ok(res) => {
+                            match res {
+                                VcpMessage::Call { ip, port, mimetype, username } => {
+                                    let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
+                                    println!("{text}");
+                                    match std::process::Command::new("start-vcp-client")
+                                            .args(["CALL", ip.as_str(), port.to_string().as_str(), mimetype.as_str(), username.as_str()])
+                                            .spawn() {
+                                                Err(e) => println!("Failed to start client: {}", e),
+                                                Ok(c) => println!("Started client"),
+                                            }
+
+                                    if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
+                                        println!("Failed to send Call response: {}", e);
+                                    }
+                                }
+
+
+                                VcpMessage::AcceptCall { ip, port, mimetype, username } => {
+                                    let mut cmap = udp_map_clone.lock().unwrap();
+                                    cmap.insert(addr, Connection::new());
+                                },
+
+                                VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
+
+
+                                VcpMessage::Packet { packet_nr, timestamp, data_len, data } => {
+                                    let mut cmap = udp_map_clone.lock().unwrap();
+
+                                    if let Some(conn) = cmap.get_mut(&addr) {
+                                        //ignore packet if old
+                                        if packet_nr >= conn.jitter_buffer.last_popped {
+                                            conn.jitter_buffer.add_packet(packet_nr, &data);
+                                            let cur_time = SystemTime::now().duration_since(UNIX_EPOCH).expect("System time broke").as_millis() as i64;
+                                            let latency = cur_time - timestamp;
+                                            conn.latency = latency as i16;
+                                        }
+
+
+                                    } else {
+                                        //placeholder for later testing purposes
+                                        panic!("Sending packets before connection intialized");
+                                    }
+                                },
+                            }
+                        },
+                        Err(err) => println!("Could not parse data: {}", err)
+                    }
+                }
+            }
+            Err(err) => println!("Socket Receive Error: {}", err)
+        };
+    }
+}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -203,77 +283,7 @@ async fn main() -> io::Result<()> {
     println!("Listening...");
     let connections_map = Arc::new(Mutex::new(HashMap::<core::net::SocketAddr, Connection>::new()));
 
-    let udp_map_clone = Arc::clone(&connections_map);
-    let udp_handle = tokio::spawn(async move {
-        let mut buf = [0; 1500]; 
-        println!("UDP task running...");
-
-        let mut receivers: HashMap<String, VcpReceiver> = HashMap::new();
-        loop {
-            match sock.recv_from(&mut buf).await {
-                Ok((amnt_read, addr)) => {
-                    let r = receivers.get_mut(&addr.to_string());
-                    match r {
-                        None => {
-                            let r = VcpReceiver::new(buf[0..amnt_read].to_vec());
-                            receivers.insert(addr.to_string(), r);
-                        }
-                        Some(r) => {
-                            r.feed(buf.to_vec());
-                        }
-                    }
-
-                    let r = receivers.get_mut(&addr.to_string()).unwrap();
-                    if *r.get_state() == VcpReceptionState::Done {
-                        match VcpMessage::parse(r.get_result()) {
-                            Ok(res) => {
-                                match res {
-                                    VcpMessage::Call { ip, port, mimetype, username } => {
-                                        let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
-                                        println!("{text}");
-
-                                        if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
-                                            println!("Failed to send Call response: {}", e);
-                                        }
-                                    }
-
-
-                                    VcpMessage::AcceptCall { ip, port, mimetype, username } => {
-                                        let mut cmap = udp_map_clone.lock().unwrap();
-                                        cmap.insert(addr, Connection::new());
-                                    },
-
-                                    VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
-
-
-                                    VcpMessage::Packet { packet_nr, timestamp, data_len, data } => {
-                                        let mut cmap = udp_map_clone.lock().unwrap();
-
-                                        if let Some(conn) = cmap.get_mut(&addr) {
-                                            //ignore packet if old
-                                            if packet_nr >= conn.jitter_buffer.last_popped {
-                                                conn.jitter_buffer.add_packet(packet_nr, &data);
-                                                let cur_time = SystemTime::now().duration_since(UNIX_EPOCH).expect("System time broke").as_millis() as i64;
-                                                let latency = cur_time - timestamp;
-                                                conn.latency = latency as i16;
-                                            }
-
-
-                                        } else {
-                                            //placeholder for later testing purposes
-                                            panic!("Sending packets before connection intialized");
-                                        }
-                                    },
-                                }
-                            },
-                            Err(err) => println!("Could not parse data: {}", err)
-                        }
-                    }
-                }
-                Err(err) => println!("Socket Receive Error: {}", err)
-            };
-        }
-    });
+    let udp_handle = tokio::spawn(udp_thread(sock, Arc::clone(&connections_map)));
 
     //for taking snapshots of connections
     let cmap_clone = Arc::clone(&connections_map);
@@ -288,6 +298,28 @@ async fn main() -> io::Result<()> {
                 conn.packet_loss = packet_loss;
             }
         }
+    });
+
+    let cmap_clone = Arc::clone(&connections_map);
+    tokio::spawn(async move {
+        unsafe { std::env::set_var("VCD_SOCKET", "127.0.0.1") };
+        unsafe { std::env::set_var("VCD_SOCKET_PORT", "8432") };
+        let sock = TcpSocket::new_v4().unwrap();
+        let addr = "127.0.0.1:8432".parse().unwrap();
+        sock.bind(addr)?;
+        let tcp = sock.listen(1)?;
+        match tcp.accept().await {
+            Ok((mut conn, addr)) => {
+                let mut buf = [0; 1500];
+                loop {
+                    if let Ok(amt) = conn.read(&mut buf).await {
+                        println!("read {} bytes from client", amt)
+                    }
+                }
+            }
+            Err(e) => println!("{}", e)
+        }
+        Ok::<(), std::io::Error>(())
     });
 
     std::future::pending::<()>().await;

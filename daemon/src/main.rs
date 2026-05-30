@@ -1,7 +1,7 @@
 mod vcpreciever;
 
 use std::cmp;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{io, str::FromStr};
 use tokio::io::AsyncReadExt;
@@ -198,9 +198,9 @@ impl VcpMessage {
 }
 
 async fn udp_thread(
-        sock: UdpSocket,
-        udp_map_clone: Arc<Mutex<HashMap<SocketAddr, Connection>>>
-    ) {
+    sock: UdpSocket,
+    udp_map_clone: Arc<Mutex<HashMap<String, Connection>>>
+) {
     let mut buf = [0; 1500]; 
     println!("UDP task running...");
 
@@ -228,11 +228,11 @@ async fn udp_thread(
                                     let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
                                     println!("{text}");
                                     match std::process::Command::new("start-vcp-client")
-                                            .args(["CALL", ip.as_str(), port.to_string().as_str(), mimetype.as_str(), username.as_str()])
-                                            .spawn() {
-                                                Err(e) => println!("Failed to start client: {}", e),
-                                                Ok(c) => println!("Started client"),
-                                            }
+                                        .args(["CALL", ip.as_str(), port.to_string().as_str(), mimetype.as_str(), username.as_str()])
+                                        .spawn() {
+                                            Err(e) => println!("Failed to start client: {}", e),
+                                            Ok(c) => println!("Started client"),
+                                        }
 
                                     if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
                                         println!("Failed to send Call response: {}", e);
@@ -242,7 +242,7 @@ async fn udp_thread(
 
                                 VcpMessage::AcceptCall { ip, port, mimetype, username } => {
                                     let mut cmap = udp_map_clone.lock().unwrap();
-                                    cmap.insert(addr, Connection::new());
+                                    cmap.insert(addr.to_string(), Connection::new());
                                 },
 
                                 VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
@@ -251,7 +251,7 @@ async fn udp_thread(
                                 VcpMessage::Packet { packet_nr, timestamp, data_len, data } => {
                                     let mut cmap = udp_map_clone.lock().unwrap();
 
-                                    if let Some(conn) = cmap.get_mut(&addr) {
+                                    if let Some(conn) = cmap.get_mut(&addr.to_string()) {
                                         //ignore packet if old
                                         if packet_nr >= conn.jitter_buffer.last_popped {
                                             conn.jitter_buffer.add_packet(packet_nr, &data);
@@ -281,7 +281,7 @@ async fn udp_thread(
 async fn main() -> io::Result<()> {
     let sock = UdpSocket::bind("0.0.0.0:7000").await?;
     println!("Listening...");
-    let connections_map = Arc::new(Mutex::new(HashMap::<core::net::SocketAddr, Connection>::new()));
+    let connections_map = Arc::new(Mutex::new(HashMap::<String, Connection>::new()));
 
     let udp_handle = tokio::spawn(udp_thread(sock, Arc::clone(&connections_map)));
 
@@ -311,8 +311,55 @@ async fn main() -> io::Result<()> {
         match tcp.accept().await {
             Ok((mut conn, addr)) => {
                 let mut buf = [0; 1500];
+                let mut receiver = VcpReceiver::new(vec![]);
+                let mut has_responded_to_call = false;
+
+                //start with a dummy address
+                let mut to_send_to: SocketAddr = SocketAddr::from_str("0.0.0.0:10000").unwrap();
                 loop {
                     if let Ok(amt) = conn.read(&mut buf).await {
+                        if receiver.get_state() != &VcpReceptionState::Done {
+                            receiver.feed(buf.to_vec());
+                        } else if !has_responded_to_call{
+                            has_responded_to_call = true;
+
+                            match VcpMessage::parse(receiver.get_result()) {
+                                Ok(r) =>  {
+                                    match r {
+                                        VcpMessage::AcceptCall { ip, port, mimetype, username } => {
+                                            let sock = UdpSocket::bind("0.0.0.0:0").await?;
+                                            let response = format!("ACCEPTCALL {} {} {} \"{}\"\r\n", ip, port, mimetype, username);
+
+                                            match SocketAddr::from_str(&format!("{}:{}", ip, port).to_string()) {
+                                                Ok(addr) => {
+                                                    to_send_to = addr;
+                                                    if let Err(e) = sock.send_to(response.as_bytes(), to_send_to).await {
+                                                        eprintln!("Failed to send resp {}", e);
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    eprintln!("Failed to convert ip {}", e);
+                                                }
+                                            };
+                                            println!("{} picked up {}:{}'s call with {}", username, ip, port, mimetype)
+                                        }
+                                        VcpMessage::DeclineCall { ip, port, mimetype, username } => {
+                                            println!("{} declined to pick up {}:{}'s call", username, ip, port)
+                                        }
+                                        _ => todo!()
+                                    }
+                                } 
+
+                                Err(e) => {
+                                    //this should probably be the same as declining the call
+                                    println!("Failed to parse msg: {}", e)
+                                }
+                            }
+                        } else {
+                            let sock = UdpSocket::bind("0.0.0.0:0").await?;
+                            //TODO: this should package buf into PACKET/<nr><len><data>
+                            //and send it over sock to `to_send_to`
+                        }
                         println!("read {} bytes from client", amt)
                     }
                 }

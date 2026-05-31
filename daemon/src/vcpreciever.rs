@@ -6,6 +6,7 @@ pub enum VcpReceptionState {
     PacketNr,
     PacketLen,
     PacketData,
+    PacketTS,
     Done,
 }
 
@@ -23,9 +24,12 @@ pub struct VcpReceiver {
     state: VcpReceptionState,
     packetlen: u64,
     packet_data: Vec<u8>,
+    packet_ts: u64,
     action_name: String,
 }
 
+
+/* parses the following argument grammar: <action>(" "<arg>)*("/"<u64><u64><u64><u64><u8>*) */
 impl VcpReceiver {
     pub fn new(bytes: Vec<u8>) -> VcpReceiver {
         let mut r = VcpReceiver {
@@ -36,7 +40,8 @@ impl VcpReceiver {
             final_action: vec![],
             packetlen: 0,
             packet_data: vec![],
-            action_name: "".to_owned()
+            action_name: "".to_owned(),
+            packet_ts: 0,
         };
 
         while r.has_bytes() && r.state != VcpReceptionState::Done{
@@ -94,9 +99,20 @@ impl VcpReceiver {
                 if self.currently_parsing.len() == 7 {
                     self.final_action.extend(&self.currently_parsing);
                     self.packetlen = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
-                    A::PacketData
+                    A::PacketTS
                 } else {
                     A::PacketLen
+                }
+            }
+
+            A::PacketTS => {
+                self.currently_parsing.push(b);
+                if self.currently_parsing.len() == 7 {
+                    self.final_action.extend(&self.currently_parsing);
+                    self.packet_ts = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
+                    A::PacketData
+                } else {
+                    A::PacketTS
                 }
             }
 

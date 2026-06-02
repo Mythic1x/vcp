@@ -150,7 +150,7 @@ impl VcpMessage {
             if bytes.len() < 25 + data_len_us {
                 return Err("Malformed packet: data length exceeds packet size");
             }
-            let data = bytes[17..25 + data_len_us].to_vec();
+            let data = bytes[25..25 + data_len_us].to_vec();
             return Ok(VcpMessage::Packet { packet_nr, timestamp, data_len, data });
         } else {
             let text = str::from_utf8(bytes).map_err(|_| "Error converting byte array into string")?;

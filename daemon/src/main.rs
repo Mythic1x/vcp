@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::vcpreciever::{VcpReceiver, VcpReceptionState};
 
+#[derive(Debug)]
 pub enum VcpMessage {
     Call {
         ip: String,
@@ -149,7 +150,7 @@ impl VcpMessage {
             if bytes.len() < 25 + data_len_us {
                 return Err("Malformed packet: data length exceeds packet size");
             }
-            let data = bytes[17..17 + data_len_us].to_vec();
+            let data = bytes[17..25 + data_len_us].to_vec();
             return Ok(VcpMessage::Packet { packet_nr, timestamp, data_len, data });
         } else {
             let text = str::from_utf8(bytes).map_err(|_| "Error converting byte array into string")?;
@@ -211,18 +212,18 @@ async fn udp_thread(
     loop {
         match sock.recv_from(&mut buf).await {
             Ok((amnt_read, addr)) => {
-                let r = receivers.get_mut(&addr.to_string());
+                let r = receivers.get_mut(&addr.ip().to_string());
                 match r {
                     None => {
                         let r = VcpReceiver::new(buf[0..amnt_read].to_vec());
-                        receivers.insert(addr.to_string(), r);
+                        receivers.insert(addr.ip().to_string(), r);
                     }
                     Some(r) => {
-                        r.feed(buf.to_vec());
+                        r.feed(buf[0..amnt_read].to_vec());
                     }
                 }
 
-                let r = receivers.get_mut(&addr.to_string()).unwrap();
+                let r = receivers.get_mut(&addr.ip().to_string()).unwrap();
                 if *r.get_state() == VcpReceptionState::Done {
                     match VcpMessage::parse(r.get_result()) {
                         Ok(res) => {
@@ -244,9 +245,13 @@ async fn udp_thread(
 
 
                                 VcpMessage::AcceptCall { ip, port, mimetype, username } => {
-                                    let mut cmap = udp_map_clone.lock().unwrap();
-                                    cmap.insert(callpending.unwrap().ip().to_string(), Connection::new());
-                                    callpending = None;
+                                    if let Some(..) = callpending && let Ok(mut cmap) = udp_map_clone.lock() {
+                                        eprintln!("INSERTING");
+                                        cmap.insert(callpending.unwrap().ip().to_string(), Connection::new());
+                                        callpending = None;
+                                    } else {
+                                        eprintln!("Failed to lock");
+                                    }
                                 },
 
                                 VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
@@ -274,6 +279,7 @@ async fn udp_thread(
                         },
                         Err(err) => eprintln!("Could not parse data: {}", err)
                     }
+                    r.reset()
                 }
             }
             Err(err) => eprintln!("Socket Receive Error: {}", err)
@@ -295,11 +301,12 @@ async fn main() -> io::Result<()> {
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         loop {
             timer.tick().await;
-            let mut cmap = cmap_clone.lock().unwrap();
-            for (_, conn) in cmap.iter_mut() {
-                conn.jitter_buffer.take_snapshot();
-                let packet_loss = conn.jitter_buffer.calculate_packet_loss();
-                conn.packet_loss = packet_loss;
+            if let Ok(mut cmap) = cmap_clone.lock() {
+                for (_, conn) in cmap.iter_mut() {
+                    conn.jitter_buffer.take_snapshot();
+                    let packet_loss = conn.jitter_buffer.calculate_packet_loss();
+                    conn.packet_loss = packet_loss;
+                }
             }
         }
     });
@@ -314,7 +321,7 @@ async fn main() -> io::Result<()> {
         let tcp = sock.listen(1)?;
         match tcp.accept().await {
             Ok((mut conn, addr)) => {
-                let mut buf = [0; 1500];
+                let mut buf = [0; 1024];
                 let mut receiver = VcpReceiver::new(vec![]);
                 let mut has_responded_to_call = false;
 
@@ -322,8 +329,8 @@ async fn main() -> io::Result<()> {
                 let mut to_send_to: SocketAddr = SocketAddr::from_str("0.0.0.0:10000").unwrap();
                 loop {
                     if let Ok(amt) = conn.read(&mut buf).await {
-                        if receiver.get_state() != &VcpReceptionState::Done {
-                            receiver.feed(buf.to_vec());
+                        if receiver.get_state() != &VcpReceptionState::Done && !has_responded_to_call{
+                            receiver.feed(buf[0..amt].to_vec());
                         } else if !has_responded_to_call{
                             has_responded_to_call = true;
 
@@ -359,19 +366,25 @@ async fn main() -> io::Result<()> {
                                     eprintln!("Failed to parse msg: {}", e)
                                 }
                             }
+                            receiver.reset();
                         } else {
 
                             let keys: Vec<String> = {
-                                let guard = cmap_clone.lock().unwrap();
-                                guard.keys().cloned().collect()
+                                if let Ok(guard) = cmap_clone.lock() {
+                                    guard.keys().cloned().collect()
+                                } else {
+                                    //this will drop a packet
+                                    vec![]
+                                }
                             };
 
                             for connection in keys {
                                 let sock = UdpSocket::bind("0.0.0.0:0").await?;
-                                sock.send_to(&buf, format!("{connection}:7000")).await?;
+                                sock.send_to(&buf[..amt], format!("{connection}:7000")).await?;
                             }
+
+                            receiver.reset();
                         }
-                        println!("read {} bytes from client", amt)
                     }
                 }
             }

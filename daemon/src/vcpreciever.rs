@@ -22,7 +22,7 @@ pub struct VcpReceiver {
     currently_parsing: Vec<u8>,
     parsing_pos: usize,
     state: VcpReceptionState,
-    packetlen: u16,
+    packetlen: usize,
     packet_data: Vec<u8>,
     packet_ts: u64,
     action_name: String,
@@ -77,6 +77,8 @@ impl VcpReceiver {
                     self.action_name = String::from("PACKET");
                     self.currently_parsing.clear();
                     A::PacketNr
+                } else if b == '\n' as u8 {
+                    A::Action
                 } else {
                     self.currently_parsing.push(b);
                     A::Action
@@ -98,7 +100,8 @@ impl VcpReceiver {
                 self.currently_parsing.push(b);
                 if self.currently_parsing.len() == 2 {
                     self.final_action.extend(&self.currently_parsing);
-                    self.packetlen = u16::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
+                    self.packetlen = u16::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length")) as usize;
+                    self.currently_parsing.clear();
                     A::PacketData
                 } else {
                     A::PacketLen
@@ -107,9 +110,10 @@ impl VcpReceiver {
 
             A::PacketTS => {
                 self.currently_parsing.push(b);
-                if self.currently_parsing.len() == 7 {
+                if self.currently_parsing.len() == 8 {
                     self.final_action.extend(&self.currently_parsing);
-                    self.packet_ts = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
+                    self.packet_ts = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet TS"));
+                    self.currently_parsing.clear();
                     A::PacketLen
                 } else {
                     A::PacketTS
@@ -118,8 +122,10 @@ impl VcpReceiver {
 
             A::PacketData => {
                 self.currently_parsing.push(b);
-                self.packet_data.push(b);
-                if self.currently_parsing.len() == self.packetlen.try_into().unwrap() {
+                if self.currently_parsing.len() == self.packetlen {
+                    self.packet_data.extend(&self.currently_parsing);
+                    self.currently_parsing.clear();
+                    self.final_action.extend(&self.packet_data);
                     A::Done
                 } else {
                     A::PacketData
@@ -160,7 +166,6 @@ impl VcpReceiver {
             }
 
             A::Done => {
-                self.backlog.push(b);
                 A::Done
             }
         };
@@ -178,12 +183,17 @@ impl VcpReceiver {
 
     ///Resets all state for a new action
     pub fn reset(&mut self) {
+        if self.parsing_pos < self.backlog.len() {
+            self.backlog = self.backlog[self.parsing_pos..].to_vec();
+        } else {
+            self.backlog.clear();
+        }
         self.parsing_pos = 0;
         self.currently_parsing.clear();
         self.packetlen = 0;
         self.state = VcpReceptionState::Action;
         self.final_action.clear();
-        self.packet_data.clear()
+        self.packet_data.clear();
     }
 
     ///Feed new bytes into the machine

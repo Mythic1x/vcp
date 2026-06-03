@@ -22,7 +22,7 @@ pub struct VcpReceiver {
     currently_parsing: Vec<u8>,
     parsing_pos: usize,
     state: VcpReceptionState,
-    packetlen: u64,
+    packetlen: u16,
     packet_data: Vec<u8>,
     packet_ts: u64,
     action_name: String,
@@ -85,10 +85,10 @@ impl VcpReceiver {
 
             A::PacketNr => {
                 self.currently_parsing.push(b);
-                if self.currently_parsing.len() == 7 {
+                if self.currently_parsing.len() == 8 {
                     self.final_action.extend(&self.currently_parsing);
                     self.currently_parsing.clear();
-                    A::PacketLen
+                    A::PacketTS
                 } else {
                     A::PacketNr
                 }
@@ -96,10 +96,10 @@ impl VcpReceiver {
 
             A::PacketLen => {
                 self.currently_parsing.push(b);
-                if self.currently_parsing.len() == 7 {
+                if self.currently_parsing.len() == 2 {
                     self.final_action.extend(&self.currently_parsing);
-                    self.packetlen = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
-                    A::PacketTS
+                    self.packetlen = u16::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
+                    A::PacketData
                 } else {
                     A::PacketLen
                 }
@@ -110,7 +110,7 @@ impl VcpReceiver {
                 if self.currently_parsing.len() == 7 {
                     self.final_action.extend(&self.currently_parsing);
                     self.packet_ts = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
-                    A::PacketData
+                    A::PacketLen
                 } else {
                     A::PacketTS
                 }

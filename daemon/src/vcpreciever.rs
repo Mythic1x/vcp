@@ -22,10 +22,12 @@ pub struct VcpReceiver {
     currently_parsing: Vec<u8>,
     parsing_pos: usize,
     state: VcpReceptionState,
-    packetlen: usize,
+    packetlen: u16,
     packet_data: Vec<u8>,
     packet_ts: u64,
+    packet_nr: u64,
     action_name: String,
+    args: Vec<String>
 }
 
 
@@ -42,6 +44,8 @@ impl VcpReceiver {
             packet_data: vec![],
             action_name: "".to_owned(),
             packet_ts: 0,
+            packet_nr: 0,
+            args: vec![]
         };
 
         while r.has_bytes() && r.state != VcpReceptionState::Done{
@@ -66,14 +70,20 @@ impl VcpReceiver {
         self.state = match self.state {
             A::Action => {
                 if b == ' ' as u8 {
-                    self.final_action.extend(&self.currently_parsing);
-                    self.final_action.push(0x20);
-                    self.action_name = String::from_utf8(self.currently_parsing.clone()).expect("got non-utf-8 response");
-                    self.currently_parsing.clear();
-                    A::UnQuotedArg
+                    if let Ok(name) = String::from_utf8(self.currently_parsing.clone()) {
+                        self.final_action.extend(&self.currently_parsing);
+                        self.final_action.push(0x20);
+                        self.action_name = name;
+                        self.currently_parsing.clear();
+                        A::UnQuotedArg
+                    } else {
+                        eprintln!("Got invalid action: {:?}", self.currently_parsing);
+                        self.currently_parsing.clear();
+                        A::Action
+                    }
                 } else if b == '/' as u8  {
                     self.final_action.extend(&self.currently_parsing);
-                    self.final_action.push(0x2F);
+                    self.final_action.push('/' as u8);
                     self.action_name = String::from("PACKET");
                     self.currently_parsing.clear();
                     A::PacketNr
@@ -89,6 +99,7 @@ impl VcpReceiver {
                 self.currently_parsing.push(b);
                 if self.currently_parsing.len() == 8 {
                     self.final_action.extend(&self.currently_parsing);
+                    self.packet_nr = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet TS"));
                     self.currently_parsing.clear();
                     A::PacketTS
                 } else {
@@ -100,9 +111,14 @@ impl VcpReceiver {
                 self.currently_parsing.push(b);
                 if self.currently_parsing.len() == 2 {
                     self.final_action.extend(&self.currently_parsing);
-                    self.packetlen = u16::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length")) as usize;
+                    self.packetlen = u16::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet data length"));
                     self.currently_parsing.clear();
-                    A::PacketData
+                    if self.packetlen == 0 {
+                        self.packet_data = vec![];
+                        A::Done
+                    } else {
+                        A::PacketData
+                    }
                 } else {
                     A::PacketLen
                 }
@@ -122,7 +138,7 @@ impl VcpReceiver {
 
             A::PacketData => {
                 self.currently_parsing.push(b);
-                if self.currently_parsing.len() == self.packetlen {
+                if self.currently_parsing.len() == self.packetlen as usize{
                     self.packet_data.extend(&self.currently_parsing);
                     self.currently_parsing.clear();
                     self.final_action.extend(&self.packet_data);
@@ -136,16 +152,23 @@ impl VcpReceiver {
                 if b == ' ' as u8 {
                     self.final_action.extend(&self.currently_parsing);
                     self.final_action.push(0x20);
+                    self.args.push(String::from_utf8_lossy(&self.currently_parsing).to_string());
                     self.currently_parsing.clear();
                     A::UnQuotedArg
                 } else if b == '"' as u8 {
                     self.final_action.extend(&self.currently_parsing);
+                    if self.currently_parsing.len() > 0 {
+                        self.args.push(String::from_utf8_lossy(&self.currently_parsing).to_string());
+                    }
                     self.currently_parsing.clear();
 
                     self.currently_parsing.push(b);
                     A::QuotedArg
                 } else if b == '\r' as u8 || b == '\n' as u8 {
                     self.final_action.extend(&self.currently_parsing);
+                    if self.currently_parsing.len() > 0 {
+                        self.args.push(String::from_utf8_lossy(&self.currently_parsing).to_string());
+                    }
                     self.currently_parsing.clear();
                     A::Done
                 } else {
@@ -156,11 +179,13 @@ impl VcpReceiver {
 
             A::QuotedArg => {
                 if b == '"' as u8 {
+                    self.currently_parsing.push(b);
                     self.final_action.extend(&self.currently_parsing);
-                    self.final_action.push(b);
+                    self.args.push(String::from_utf8_lossy(&self.currently_parsing).to_string());
+                    self.currently_parsing.clear();
                     A::UnQuotedArg
                 } else {
-                    self.final_action.push(b);
+                    self.currently_parsing.push(b);
                     A::QuotedArg
                 }
             }
@@ -191,9 +216,15 @@ impl VcpReceiver {
         self.parsing_pos = 0;
         self.currently_parsing.clear();
         self.packetlen = 0;
+        self.packet_ts = 0;
+        self.packet_nr = 0;
         self.state = VcpReceptionState::Action;
         self.final_action.clear();
         self.packet_data.clear();
+    }
+
+    pub fn get_action(&self) -> &String {
+        return &self.action_name;
     }
 
     ///Feed new bytes into the machine
@@ -215,5 +246,25 @@ impl VcpReceiver {
     ///Returns the final result, should be called when feed returns the Done variant
     pub fn get_result(&self) -> &Vec<u8> {
         return &self.final_action
+    }
+
+    pub fn get_args(&self) -> &Vec<String> {
+        return &self.args;
+    }
+
+    pub fn get_packet_nr(&self) -> u64 {
+        return self.packet_nr;
+    }
+
+    pub fn get_packet_data(&self) -> &Vec<u8> {
+        return &self.packet_data;
+    }
+
+    pub fn get_packet_len(&self) -> u16 {
+        return self.packetlen;
+    }
+
+    pub fn get_packet_ts(&self) -> u64 {
+        return self.packet_ts;
     }
 }

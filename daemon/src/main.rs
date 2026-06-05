@@ -105,9 +105,12 @@ impl JitterBuffer {
 
         let expected_packets = highest - lowest + 1;
         let received_packets = current_snapshot.packets_received - oldest_snapshot.packets_received as u64;
-        let diff = expected_packets - received_packets;
-        let packet_loss_ratio = (diff as f64) / (expected_packets as f64);
-        return packet_loss_ratio * 100.0;
+        if received_packets < expected_packets {
+            let diff = expected_packets - received_packets;
+            let packet_loss_ratio = (diff as f64) / (expected_packets as f64);
+            return packet_loss_ratio * 100.0;
+        }
+        return 100.0;
     }
 
     fn add_packet(&mut self, packet_nr: u64, packet: &Vec<u8>,) {
@@ -127,74 +130,6 @@ impl JitterBuffer {
         }
         let snapshot = NetworkSnapshot::new(self.total_received_packets, self.highest_packet_nr);
         self.snapshots.push_back(snapshot);
-    }
-}
-
-
-
-
-
-impl VcpMessage {
-    fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
-        if bytes.starts_with(b"PACKET/")  {
-            if bytes.len() < 15 {
-                return Err("Malformed Packet: Missing Data");
-            }
-            let packet_nr_bytes = &bytes[7..15];
-            let packet_nr = u64::from_be_bytes(packet_nr_bytes.try_into().map_err(|_| "Malformed packet found when parsing packet number")?);
-            let timestamp_bytes = &bytes[15..23];
-            let timestamp = i64::from_be_bytes(timestamp_bytes.try_into().map_err(|_| "Malformed packet found when parsing timestamp")?);
-            let data_len_bytes = &bytes[23..25]; 
-            let data_len = u16::from_be_bytes(data_len_bytes.try_into().map_err(|_| "Malformed packet found when parsing data length")?);
-            let data_len_us = data_len as usize;
-            if bytes.len() < 25 + data_len_us {
-                return Err("Malformed packet: data length exceeds packet size");
-            }
-            let data = bytes[25..25 + data_len_us].to_vec();
-            return Ok(VcpMessage::Packet { packet_nr, timestamp, data_len, data, raw_bytes: bytes.to_vec() });
-        } else {
-            let text = str::from_utf8(bytes).map_err(|_| "Error converting byte array into string")?;
-            let text = text.strip_suffix("\r\n").unwrap_or(text);
-            let mut args = text.split(" ");
-            match (args.next()) {
-                Some("CALL")  => {
-                    let ip = args.next().ok_or("Malformed Packet: Missing IP")?.to_string();
-                    let str_port = args.next().ok_or("Malformed Packet: Missing port")?;
-                    let port = str_port.parse::<u16>().map_err(|_| "Invalid port number")?;
-                    let mimetype = args.next().ok_or("Malformed Packet: Missing Mimetype")?.to_string();
-                    let username = args.collect::<Vec<&str>>().join(" ").replace('"', "");
-                    if username.is_empty() {
-                        return Err("Malformed Packet: Missing Username")
-                    } 
-                    return Ok(VcpMessage::Call { ip: ip.to_string(), port, mimetype, username });
-                }
-                Some("ACCEPTCALL")  => {
-                    let ip = args.next().ok_or("Malformed Packet: Missing IP")?.to_string();
-                    let str_port = args.next().ok_or("Malformed Packet: Missing port")?;
-                    let port = str_port.parse::<u16>().map_err(|_| "Invalid port number")?;
-                    let mimetype = args.next().ok_or("Malformed Packet: Missing Mimetype")?.to_string();
-                    let username = args.collect::<Vec<&str>>().join(" ").replace('"', "");
-                    if username.is_empty() {
-                        return Err("Malformed Packet: Missing Username")
-                    } 
-                    return Ok(VcpMessage::AcceptCall { ip, port, mimetype, username });
-                }
-                Some("DECLINECALL")  => {
-                    let ip = args.next().ok_or("Malformed Packet: Missing IP")?.to_string();
-                    let str_port = args.next().ok_or("Malformed Packet: Missing port")?;
-                    let port = str_port.parse::<u16>().map_err(|_| "Invalid port number")?;
-                    let mimetype = args.next().ok_or("Malformed Packet: Missing Mimetype")?.to_string();
-                    let username = args.collect::<Vec<&str>>().join(" ").replace('"', "");
-
-                    if username.is_empty() {
-                        return Err("Malformed Packet: Missing Username")
-                    } 
-                    return Ok(VcpMessage::DeclineCall { ip, port, mimetype, username });
-                }
-                _ => Err("Unknown Command or Malformed Packet"),
-            }
-
-        }
     }
 }
 
@@ -224,63 +159,69 @@ async fn udp_thread(
                 }
 
                 let r = receivers.get_mut(&addr.ip().to_string()).unwrap();
-                if *r.get_state() == VcpReceptionState::Done {
-                    match VcpMessage::parse(r.get_result()) {
-                        Ok(res) => {
-                            match res {
-                                VcpMessage::Call { ip, port, mimetype, username } => {
-                                    let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
-                                    unsafe { std::env::set_var("VCD_SOCKET", "127.0.0.1") };
-                                    unsafe { std::env::set_var("VCD_SOCKET_PORT", "8432") };
-                                    match std::process::Command::new("start-vcp-client")
-                                        .args(["CALL", ip.as_str(), port.to_string().as_str(), mimetype.as_str(), username.as_str()])
-                                        .spawn() {
-                                            Err(e) => eprintln!("Failed to start client: {}", e),
-                                            Ok(c) => eprintln!("Started client"),
-                                        }
-
-                                    callpending = Some(addr);
-                                    if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
-                                        eprintln!("Failed to send Call response: {}", e);
-                                    }
+                while *r.get_state() == VcpReceptionState::Done {
+                    let action = r.get_action().as_str();
+                    let args = r.get_args();
+                    match action {
+                        "CALL" => {
+                            let ip = args[0].clone();
+                            let port = args[1].clone();
+                            let mimetype = args[2].clone();
+                            let username = args[3].clone();
+                            let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
+                            unsafe { std::env::set_var("VCD_SOCKET", "127.0.0.1") };
+                            unsafe { std::env::set_var("VCD_SOCKET_PORT", "8432") };
+                            match std::process::Command::new("start-vcp-client")
+                                .args(["CALL", ip.as_str(), port.to_string().as_str(), mimetype.as_str(), username.as_str()])
+                                .spawn() {
+                                    Err(e) => eprintln!("Failed to start client: {}", e),
+                                    Ok(c) => eprintln!("Started client"),
                                 }
 
-
-                                VcpMessage::AcceptCall { ip, port, mimetype, username } => {
-                                    if let Some(..) = callpending && let Ok(mut cmap) = udp_map_clone.lock() {
-                                        cmap.insert(callpending.unwrap().ip().to_string(), Connection::new());
-                                        callpending = None;
-                                    } else {
-                                        eprintln!("Failed to lock");
-                                    }
-                                },
-
-                                VcpMessage::DeclineCall { ip, port, mimetype, username } => todo!(),
-
-
-                                VcpMessage::Packet { packet_nr, timestamp, data_len, data, raw_bytes } => {
-                                    let mut cmap = udp_map_clone.lock().unwrap();
-
-                                    if let Some(conn) = cmap.get_mut(&addr.ip().to_string()) {
-                                        //ignore packet if old
-                                        if packet_nr >= conn.jitter_buffer.last_popped {
-                                            conn.jitter_buffer.add_packet(packet_nr, &raw_bytes);
-                                            let cur_time = SystemTime::now().duration_since(UNIX_EPOCH).expect("System time broke").as_millis() as i64;
-                                            let latency = cur_time - timestamp;
-                                            conn.latency = latency as i16;
-                                        }
-
-
-                                    } else {
-                                        //placeholder for later testing purposes
-                                        panic!("Sending packets before connection intialized");
-                                    }
-                                },
+                            callpending = Some(addr);
+                            if let Err(e) = sock.send_to(text.as_bytes(), addr).await {
+                                eprintln!("Failed to send Call response: {}", e);
                             }
-                        },
-                        Err(err) => eprintln!("Could not parse data: {}", err)
+                            eprintln!("{:?}", r.get_args());
+                        }
+
+                        "ACCEPTCALL" => {
+                            let ip = args[0].clone();
+                            let port = args[1].clone();
+                            let mime = args[2].clone();
+                            let user = args[3].clone();
+                            if let Some(..) = callpending && let Ok(mut cmap) = udp_map_clone.lock() {
+                                cmap.insert(callpending.unwrap().ip().to_string(), Connection::new());
+                                callpending = None;
+                            } else {
+                                eprintln!("Failed to lock");
+                            }
+                        }
+
+                        "PACKET" => {
+                            let mut cmap = udp_map_clone.lock().unwrap();
+                            let packet_nr = r.get_packet_nr();
+                            let raw_bytes = r.get_result();
+                            let timestamp = r.get_packet_ts() as i64;
+
+                            if let Some(conn) = cmap.get_mut(&addr.ip().to_string()) {
+                                //ignore packet if old
+                                if packet_nr >= conn.jitter_buffer.last_popped {
+                                    conn.jitter_buffer.add_packet(packet_nr, &raw_bytes);
+                                    let cur_time = SystemTime::now().duration_since(UNIX_EPOCH).expect("System time broke").as_millis() as i64;
+                                    let latency = cur_time - timestamp;
+                                    conn.latency = latency as i16;
+                                }
+                            } else {
+                                //placeholder for later testing purposes
+                                panic!("Sending packets before connection intialized");
+                            }
+                        }
+
+                        _ => eprintln!("Invalid action {action}"),
                     }
-                    r.reset()
+                    r.reset();
+                    r.feed(vec![]);
                 }
             }
             Err(err) => eprintln!("Socket Receive Error: {}", err)
@@ -313,16 +254,13 @@ async fn main() -> io::Result<()> {
         }
     });
 
-    let cmap_clone = Arc::clone(&connections_map);
-    
     let tcp_sock = TcpSocket::new_v4().unwrap();
-    let addr = "127.0.0.1:8432".parse().unwrap();
-    tcp_sock.bind(addr)?;
+    tcp_sock.bind("127.0.0.1:8432".parse().unwrap())?;
     let tcp = tcp_sock.listen(1)?;
     let (conn, addr) = tcp.accept().await?;
     let(read_half, write_half) = conn.into_split();
     let shared_tcp_writer = Arc::new(tokio::sync::Mutex::new(write_half));
-    let cmap_clone = connections_map.clone();
+    let cmap_clone = Arc::clone(&connections_map);
     let udp_clone = shared_socket.clone();
     tokio::spawn(async move {
         let sock = udp_clone;
@@ -331,70 +269,72 @@ async fn main() -> io::Result<()> {
         let mut receiver = VcpReceiver::new(vec![]);
         let mut has_responded_to_call = false;
 
-        /**********************************************************************/
-        /*                     START WITH A DUMMY ADDRESS                     */
-        let mut to_send_to: SocketAddr = SocketAddr::from_str("0.0.0.0:10000")
-                                .unwrap();
-        /*                      INCREDIBLY IMPORTANT                          */
-        /**********************************************************************/
-                loop {
-                    if let Ok(amt) = tcp_reader.read(&mut buf).await {
-                        if receiver.get_state() != &VcpReceptionState::Done && !has_responded_to_call{
-                            receiver.feed(buf[0..amt].to_vec());
-                        } else if !has_responded_to_call{
-                            has_responded_to_call = true;
+        /*********************************************************************
+        *                  <del>                                             *
+        *                      START WITH A DUMMY ADDRESS                    *
+        *                      INCREDIBLY IMPORTANT                          *
+        *                  </del>                                            *
+        *                  THE DUMMY ADDRESS HAS BEEN DELETED                *
+        *                  PLEASE SEE SECTION 3.4-A AS TO WHY THIS IS        *
+        *********************************************************************/
+        loop {
+            if let Ok(amt) = tcp_reader.read(&mut buf).await {
+                if receiver.get_state() != &VcpReceptionState::Done && !has_responded_to_call{
+                    receiver.feed(buf[0..amt].to_vec());
+                } else if !has_responded_to_call{
+                    has_responded_to_call = true;
+                    let args = receiver.get_args();
+                    match receiver.get_action().as_str() {
+                        "ACCEPTCALL" => {
+                            let ip = args[0].clone();
+                            let port = args[1].clone();
+                            let mimetype = args[2].clone();
+                            let username = args[3].clone();
+                            let response = format!("ACCEPTCALL {} {} {} \"{}\"\r\n", ip, port, mimetype, username);
 
-                            match VcpMessage::parse(receiver.get_result()) {
-                                Ok(r) =>  {
-                                    match r {
-                                        VcpMessage::AcceptCall { ip, port, mimetype, username } => {
-                                            let response = format!("ACCEPTCALL {} {} {} \"{}\"\r\n", ip, port, mimetype, username);
-
-                                            match SocketAddr::from_str(&format!("{}:{}", ip, port).to_string()) {
-                                                Ok(addr) => {
-                                                    to_send_to = addr;
-                                                    if let Err(e) = sock.send_to(response.as_bytes(), to_send_to).await {
-                                                        eprintln!("Failed to send resp {}", e);
-                                                    }
-                                                },
-                                                Err(e) => {
-                                                    eprintln!("Failed to convert ip {}", e);
-                                                }
-                                            };
-                                            eprintln!("{} picked up {}:{}'s call with {}", username, ip, port, mimetype)
-                                        }
-                                        VcpMessage::DeclineCall { ip, port, mimetype, username } => {
-                                            eprintln!("{} declined to pick up {}:{}'s call", username, ip, port)
-                                        }
-                                        _ => todo!()
+                            match SocketAddr::from_str(&format!("{}:{}", ip, port).to_string()) {
+                                Ok(addr) => {
+                                    if let Err(e) = sock.send_to(response.as_bytes(), addr).await {
+                                        eprintln!("Failed to send resp {}", e);
                                     }
-                                } 
-
+                                },
                                 Err(e) => {
-                                    //this should probably be the same as declining the call
-                                    eprintln!("Failed to parse msg: {}", e)
-                                }
-                            }
-                            receiver.reset();
-                        } else {
-
-                            let keys: Vec<String> = {
-                                if let Ok(guard) = cmap_clone.lock() {
-                                    guard.keys().cloned().collect()
-                                } else {
-                                    //this will drop a packet
-                                    vec![]
+                                    eprintln!("Failed to convert ip {}", e);
                                 }
                             };
+                            eprintln!("{} picked up {}:{}'s call with {}", username, ip, port, mimetype)
+                        },
+                        "DECLINECALL" => {
+                            let ip = args[0].clone();
+                            let port = args[1].clone();
+                            let mimetype = args[2].clone();
+                            let username = args[3].clone();
+                            eprintln!("{} declined to pick up {}:{}'s call", username, ip, port)
+                        },
+                        _ => eprintln!("Invalid action {}", receiver.get_action().as_str()),
+                    }
 
-                            for connection in keys {
-                                if let Err(e) = sock.send_to(&buf[..amt], format!("{connection}:7000")).await {
-                                    eprintln!("Failed to forward packet to {}: {}", connection, e);
-                                }
-                            }
+                    receiver.reset();
+                } else {
+
+                    let keys: Vec<String> = {
+                        if let Ok(guard) = cmap_clone.lock() {
+                            guard.keys().cloned().collect()
+                        } else {
+                            eprintln!("DROPPED PACKET");
+                            //this will drop a packet
+                            vec![]
+                        }
+                    };
+
+                    for connection in keys {
+                        if let Err(e) = sock.send_to(&buf[..amt], format!("{connection}:7000")).await {
+                            eprintln!("Failed to forward packet to {}: {}", connection, e);
                         }
                     }
                 }
+            }
+        }
     });
     let cmap_clone = connections_map.clone();
     let value = shared_tcp_writer.clone();

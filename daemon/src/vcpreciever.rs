@@ -66,11 +66,17 @@ impl VcpReceiver {
         self.state = match self.state {
             A::Action => {
                 if b == ' ' as u8 {
-                    self.final_action.extend(&self.currently_parsing);
-                    self.final_action.push(0x20);
-                    self.action_name = String::from_utf8(self.currently_parsing.clone()).expect("got non-utf-8 response");
-                    self.currently_parsing.clear();
-                    A::UnQuotedArg
+                    if let Ok(name) = String::from_utf8(self.currently_parsing.clone()) {
+                        self.final_action.extend(&self.currently_parsing);
+                        self.final_action.push(0x20);
+                        self.action_name = name;
+                        self.currently_parsing.clear();
+                        A::UnQuotedArg
+                    } else {
+                        eprintln!("Got invalid action: {:?}", self.currently_parsing);
+                        self.currently_parsing.clear();
+                        A::Action
+                    }
                 } else if b == '/' as u8  {
                     self.final_action.extend(&self.currently_parsing);
                     self.final_action.push(0x2F);

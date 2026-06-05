@@ -248,7 +248,6 @@ async fn udp_thread(
 
                                 VcpMessage::AcceptCall { ip, port, mimetype, username } => {
                                     if let Some(..) = callpending && let Ok(mut cmap) = udp_map_clone.lock() {
-                                        eprintln!("INSERTING");
                                         cmap.insert(callpending.unwrap().ip().to_string(), Connection::new());
                                         callpending = None;
                                     } else {
@@ -332,8 +331,12 @@ async fn main() -> io::Result<()> {
         let mut receiver = VcpReceiver::new(vec![]);
         let mut has_responded_to_call = false;
 
-                //start with a dummy address
-        let mut to_send_to: SocketAddr = SocketAddr::from_str("0.0.0.0:10000").unwrap();
+        /**********************************************************************/
+        /*                     START WITH A DUMMY ADDRESS                     */
+        let mut to_send_to: SocketAddr = SocketAddr::from_str("0.0.0.0:10000")
+                                .unwrap();
+        /*                      INCREDIBLY IMPORTANT                          */
+        /**********************************************************************/
                 loop {
                     if let Ok(amt) = tcp_reader.read(&mut buf).await {
                         if receiver.get_state() != &VcpReceptionState::Done && !has_responded_to_call{
@@ -389,8 +392,6 @@ async fn main() -> io::Result<()> {
                                     eprintln!("Failed to forward packet to {}: {}", connection, e);
                                 }
                             }
-
-                            receiver.reset();
                         }
                     }
                 }

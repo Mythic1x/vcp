@@ -230,8 +230,6 @@ async fn udp_thread(
                             match res {
                                 VcpMessage::Call { ip, port, mimetype, username } => {
                                     let text = format!("Incoming Call from {ip} port {port} with mimetype {mimetype} and username {username}");
-                                    unsafe { std::env::set_var("VCD_SOCKET", "127.0.0.1") };
-                                    unsafe { std::env::set_var("VCD_SOCKET_PORT", "8432") };
                                     match std::process::Command::new("start-vcp-client")
                                         .args(["CALL", ip.as_str(), port.to_string().as_str(), mimetype.as_str(), username.as_str()])
                                         .spawn() {
@@ -326,6 +324,8 @@ async fn main() -> io::Result<()> {
     let cmap_clone = connections_map.clone();
     let udp_clone = shared_socket.clone();
     tokio::spawn(async move {
+        unsafe { std::env::set_var("VCD_SOCKET", "127.0.0.1") };
+        unsafe { std::env::set_var("VCD_SOCKET_PORT", "8432") };
         let sock = udp_clone;
         let mut tcp_reader = read_half;
         let mut buf = [0; 1024];

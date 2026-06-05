@@ -83,7 +83,7 @@ impl VcpReceiver {
                     }
                 } else if b == '/' as u8  {
                     self.final_action.extend(&self.currently_parsing);
-                    self.final_action.push(0x2F);
+                    self.final_action.push('/' as u8);
                     self.action_name = String::from("PACKET");
                     self.currently_parsing.clear();
                     A::PacketNr
@@ -99,6 +99,7 @@ impl VcpReceiver {
                 self.currently_parsing.push(b);
                 if self.currently_parsing.len() == 8 {
                     self.final_action.extend(&self.currently_parsing);
+                    self.packet_nr = u64::from_be_bytes(self.currently_parsing.clone().try_into().expect("could not convert bytes into 8 wide word for packet TS"));
                     self.currently_parsing.clear();
                     A::PacketTS
                 } else {

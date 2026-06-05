@@ -159,7 +159,7 @@ async fn udp_thread(
                 }
 
                 let r = receivers.get_mut(&addr.ip().to_string()).unwrap();
-                if *r.get_state() == VcpReceptionState::Done {
+                while *r.get_state() == VcpReceptionState::Done {
                     let action = r.get_action().as_str();
                     let args = r.get_args();
                     match action {
@@ -212,8 +212,6 @@ async fn udp_thread(
                                     let latency = cur_time - timestamp;
                                     conn.latency = latency as i16;
                                 }
-
-
                             } else {
                                 //placeholder for later testing purposes
                                 panic!("Sending packets before connection intialized");
@@ -222,7 +220,8 @@ async fn udp_thread(
 
                         _ => eprintln!("Invalid action {action}"),
                     }
-                    r.reset()
+                    r.reset();
+                    r.feed(vec![]);
                 }
             }
             Err(err) => eprintln!("Socket Receive Error: {}", err)
@@ -322,6 +321,7 @@ async fn main() -> io::Result<()> {
                         if let Ok(guard) = cmap_clone.lock() {
                             guard.keys().cloned().collect()
                         } else {
+                            eprintln!("DROPPED PACKET");
                             //this will drop a packet
                             vec![]
                         }
